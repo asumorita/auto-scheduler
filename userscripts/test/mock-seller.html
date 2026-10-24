@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Mock Seller Central offer editor</title>
+<style>
+  body { font: 14px sans-serif; margin: 0; display: flex; gap: 16px; }
+  aside { width: 260px; padding: 8px; }
+  main { flex: 1; padding: 8px; }
+  kat-input, kat-textarea, kat-button, kat-dropdown, kat-flag, kat-radiobutton { display: inline-block; min-width: 12px; min-height: 12px; margin: 2px; }
+  kat-panel-wrapper, kat-panel, kat-modal { display: block; border: 1px solid #999; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="ngstrim-header"><button type="button" aria-label="ASU@USA 日本">ASU@USA 日本</button></div>
+<div id="page"></div>
+<script>
+// A stand-in for Amazon's listing editor, modelled on the selectors the userscript
+// relies on. Behaviour switches come from localStorage['mock.cfg'] so the test
+// runner can inject the timing problems the userscript has to survive.
+(() => {
+  const MARKET = 'A1VC38T7YXB528';
+  const params = new URLSearchParams(location.search);
+  const SKU = params.get('sku');
+  const ASIN = params.get('asin');
+  const load = (k, d) => { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); };
+  const store = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+  const cfg = load('mock.cfg', {});
+  const log = e => { const l = load('mock.log', []); l.push(e); store('mock.log', l); };
+
+  const server = load('mock.server', { max: cfg.initialMax ?? '10', price: '1156', pending: null, loads: 0, submits: 0 });
+  server.loads++;
+  if (server.pending) {
+    if (server.pending.after > 0) server.pending.after--;
+    else { Object.assign(server, server.pending.values); server.pending = null; }
+  }
+  store('mock.server', server);
+  log(`load#${server.loads} max=${server.max}`);
+
+  let committed = {};   // staged by panel Save, sent by 変更を送信
+  let local = {};       // edits inside the open panel
+  const value = k => local[k] ?? committed[k] ?? server[k];
+  const editCount = () => Object.keys(committed).filter(k => committed[k] !== server[k]).length;
+
+  let uid = 0;
+  class KatInput extends HTMLElement {
+    connectedCallback() {
+      if (this.shadowRoot) return;
+      const root = this.attachShadow({ mode: 'open' });
+      const input = document.createElement(this.tagName === 'KAT-TEXTAREA' ? 'textarea' : 'input');
+      input.name = this.getAttribute('name') || '';
+      input.id = 'katal-id-' + (++uid);
+      if (input.tagName === 'INPUT') input.type = this.getAttribute('type') || 'text';
+      input.setAttribute('aria-label', this.getAttribute('kat-aria-label') || '');
+      input.value = this.getAttribute('value') || '';
+      input.disabled = this.hasAttribute('disabled');
+      input.addEventListener('input', () => { this.setAttribute('value', input.value); this.onKatChange?.(input.value); });
+      root.append(input);
+    }
+  }
+  customElements.define('kat-input', KatInput);
+  customElements.define('kat-textarea', class extends KatInput {});
+  customElements.define('kat-button', class extends HTMLElement {
+    connectedCallback() {
+      if (this.shadowRoot) return;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.append(document.createElement('slot'));
+      button.addEventListener('click', () => { if (!this.hasAttribute('disabled')) this.onKatClick?.(); });
+      this.attachShadow({ mode: 'open' }).append(button);
+    }
+  });
+  customElements.define('kat-dropdown', class extends HTMLElement {
+    connectedCallback() {
+      if (this.shadowRoot) return;
+      const root = this.attachShadow({ mode: 'open' });
+      const header = document.createElement('div');
+      header.setAttribute('part', 'dropdown-header');
+      header.style.cssText = 'display:block;min-height:12px;border:1px solid #888';
+      header.textContent = this.getAttribute('value') || '';
+      const list = document.createElement('div');
+      list.style.display = 'none';
+      for (const [v, label] of JSON.parse(this.dataset.options || '[]')) {
+        const option = document.createElement('kat-option');
+        option.setAttribute('role', 'option');
+        option.setAttribute('value', v);
+        option.textContent = label;
+        option.style.display = 'block';
+        option.addEventListener('click', () => {
+          list.style.display = 'none';
+          this.setAttribute('value', v);
+          header.textContent = v;
+          this.onKatChange?.(v);
+        });
+        list.append(option);
+      }
+      header.addEventListener('click', () => { list.style.display = list.style.display === 'none' ? 'block' : 'none'; });
+      root.append(header, list);
+    }
+  });
+
+  const boxes = ['identity', 'description', 'details', 'offer', 'safety'];
+  document.getElementById('page').outerHTML = `
+    <aside>
+      <h1>出品情報の編集</h1>
+      <div data-testid="page-title-sku">SKU：${SKU}</div>
+      <div id="product-details-banner">テスト商品 <span>ASIN: ${ASIN}</span></div>
+      <nav>${boxes.map(b => `<div id="hub-item-box-${b}">${b} <span data-testid="hub-nav-item-state-label" text="編集はありません">編集はありません</span></div>`).join('')}</nav>
+      <kat-button id="form-submit-button" data-testid="submit-button" type="button" data-cy="submit-button" data-ready-to-submit="false">送信</kat-button>
+    </aside>
+    <main id="desktopMainSection">
+      <kat-button id="attribute-filter-button" label="フィルター" type="button">フィルター</kat-button>
+      <div id="main-body">読み込み中…</div>
+    </main>`;
+  const main = document.getElementById('desktopMainSection');
+  const body = document.getElementById('main-body');
+  const submit = document.getElementById('form-submit-button');
+
+  function setLabels(text) {
+    for (const label of document.querySelectorAll('[data-testid="hub-nav-item-state-label"]')) {
+      const own = label.closest('#hub-item-box-offer') ? text : (text === '' ? '' : '編集はありません');
+      label.setAttribute('text', own);
+      label.textContent = own;
+    }
+  }
+  const updateCounts = () => setLabels(editCount() ? String(editCount()) : '編集はありません');
+
+  let readyTimer;
+  function setReady(ready) {
+    submit.setAttribute('data-cy', ready ? 'submit-button-ready' : 'submit-button');
+    submit.setAttribute('data-ready-to-submit', ready ? 'true' : 'false');
+    submit.textContent = ready ? '変更を送信' : '送信';
+  }
+  function scheduleReady() {
+    clearTimeout(readyTimer);
+    setReady(false);
+    if (editCount() && !document.querySelector('kat-panel-wrapper')) {
+      readyTimer = setTimeout(() => setReady(true), cfg.readyDelay ?? 1500);
+    }
+  }
+
+  function renderCards() {
+    body.innerHTML = `
+      <h2>価格と在庫を追加</h2>
+      <div id="losg-source-marketplace-card"><div data-testid="source-marketplace-card">
+        <kat-flag data-testid="country-flag" country="jp"></kat-flag>
+        <span data-testid="card-display-name" text="日本">日本</span>
+        <div id="card-price-details-slot-${MARKET}">JPY¥ ${value('price')}</div>
+        <div data-testid="card-fulfillment-by-amazon-${MARKET}">フルフィルメント by Amazon</div>
+        <kat-button data-testid="card-edit-action" label="編集" type="button">編集</kat-button>
+      </div></div>
+      <div><span>メキシコ</span> このブランドには出品許可が必要です。</div>`;
+    body.querySelector('[data-testid="card-edit-action"]').onKatClick = openPanel;
+  }
+
+  let editClicks = 0;
+  let fieldsRendered = 0;
+  function openPanel() {
+    editClicks++;
+    if (cfg.deadEditClicks && server.loads === 1 && editClicks <= cfg.deadEditClicks) { log('edit-click-ignored'); return; }
+    if (document.querySelector('kat-panel-wrapper')) return;
+    log('panel-open');
+    clearTimeout(readyTimer);
+    setReady(false);
+    const wrapper = document.createElement('kat-panel-wrapper');
+    wrapper.setAttribute('data-testid', 'attributeFormPanelWrapper');
+    wrapper.setAttribute('panel-visible', '');
+    wrapper.innerHTML = `
+      <kat-panel visible>
+        <div slot="header"><kat-flag country="jp"></kat-flag><span data-testid="card-display-name" text="日本">日本</span></div>
+        <kat-dropdown data-testid="losg-attribute-filter" name="losg-attribute-filter" value="Required"
+          data-options='[["Required","必須"],["All","すべて"]]'></kat-dropdown>
+        <div class="fields"></div>
+        <div slot="footer">
+          <kat-button data-testid="kat-button-cancel" label="キャンセル" type="button">キャンセル</kat-button>
+          <kat-button data-testid="kat-button-save" label="保存" type="button">保存</kat-button>
+        </div>
+      </kat-panel>`;
+    main.append(wrapper);
+    const filter = wrapper.querySelector('kat-dropdown');
+    filter.onKatChange = () => renderFields(wrapper);
+    renderFields(wrapper);
+    wrapper.querySelector('[data-testid="kat-button-save"]').onKatClick = () => {
+      log('panel-save ' + JSON.stringify(local));
+      if (cfg.tamper) local.price = String(Number(value('price')) + 1);
+      committed = { ...committed, ...local };
+      local = {};
+      closePanel();
+    };
+    wrapper.querySelector('[data-testid="kat-button-cancel"]').onKatClick = () => {
+      log('panel-cancel');
+      local = {};
+      closePanel();
+      if (cfg.navFlicker) {
+        setLabels('');
+        setTimeout(updateCounts, cfg.navFlicker);
+      }
+    };
+  }
+  function closePanel() {
+    document.querySelector('kat-panel-wrapper')?.remove();
+    updateCounts();
+    renderCards();
+    scheduleReady();
+  }
+  function renderFields(wrapper) {
+    const all = wrapper.querySelector('kat-dropdown').getAttribute('value') === 'All';
+    const rendering = ++fieldsRendered;
+    const ship = cfg.lazyField ? '' : 'prime-default';
+    wrapper.querySelector('.fields').innerHTML = `
+      <kat-input id="contribution_sku-0-value" name="contribution_sku-0-value" kat-aria-label="SKU" value="${SKU}" disabled></kat-input>
+      <kat-dropdown id="condition_type-0-value" name="condition_type-0-value" value="new_new"></kat-dropdown>
+      <kat-radiobutton id="fulfillment-mfn" name="fulfillment_channel" label="出品者自身で発送" checked disabled></kat-radiobutton>
+      <kat-radiobutton id="fulfillment-afn" name="fulfillment_channel" label="Amazonから出荷(FBA)" disabled></kat-radiobutton>
+      <kat-input id="purchasable_offer-0-our_price" name="purchasable_offer-0-our_price" kat-aria-label="販売価格" value="${value('price')}"></kat-input>
+      ${all ? `
+      <kat-textarea id="condition_note-0-value" name="condition_note-0-value" kat-aria-label="提供条件に関する注記" value="当店は神奈川県より発送"></kat-textarea>
+      <kat-input id="list_price-0-value" name="list_price-0-value" kat-aria-label="税込みの参考価格" value="700.0"></kat-input>
+      <kat-input id="product_tax_code-0-value" name="product_tax_code-0-value" kat-aria-label="商品タックスコード" value=""></kat-input>
+      <kat-dropdown id="merchant_shipping_group-0-value" name="merchant_shipping_group-0-value" value="${ship}"></kat-dropdown>
+      <kat-input id="max_order_quantity-0-value" name="max_order_quantity-0-value" kat-aria-label="最大注文可能個数" type="number" value="${value('max')}"></kat-input>
+      <kat-radiobutton id="gift_message-yes" name="gift_message" label="可"></kat-radiobutton>
+      <kat-radiobutton id="gift_message-no" name="gift_message" label="いいえ"></kat-radiobutton>
+      <kat-dropdown id="payment_exclusion-0-value" name="payment_exclusion-0-value" value="cash_on_delivery"></kat-dropdown>` : ''}`;
+    const max = wrapper.querySelector('#max_order_quantity-0-value');
+    if (max) max.onKatChange = v => { local.max = v; log('max-input ' + v); };
+    const price = wrapper.querySelector('#purchasable_offer-0-our_price');
+    price.onKatChange = v => { local.price = v; log('PRICE-INPUT ' + v); };
+    // A lazily loaded option list fills its value shortly after rendering.
+    if (cfg.lazyField && all) setTimeout(() => {
+      if (rendering === fieldsRendered) wrapper.querySelector('#merchant_shipping_group-0-value')?.setAttribute('value', 'prime-default');
+    }, cfg.lazyField);
+  }
+
+  submit.onKatClick = () => {
+    if (submit.getAttribute('data-ready-to-submit') !== 'true') { log('submit-ignored'); return; }
+    log('SUBMIT ' + JSON.stringify(committed));
+    server.submits++;
+    if (!(cfg.loseSubmits >= server.submits)) server.pending = { values: { ...committed }, after: cfg.lagLoads ?? 0 };
+    store('mock.server', server);
+    committed = {};
+    updateCounts();
+    setReady(false);
+    setTimeout(() => {
+      const modal = document.createElement('kat-modal');
+      modal.setAttribute('role', 'dialog');
+      modal.innerHTML = cfg.noDialog
+        ? '<h2>送信を受け付けました</h2><p>処理には時間がかかる場合があります</p>'
+        : '<h2>編集内容が送信されました</h2><p>すべて完了しました。</p>';
+      document.body.append(modal);
+    }, 800);
+  };
+
+  if (cfg.lateCards) setTimeout(renderCards, cfg.lateCards);
+  else renderCards();
+})();
+</script>
+</body>
+</html>

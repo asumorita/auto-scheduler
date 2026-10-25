@@ -54,11 +54,14 @@
       input.setAttribute('aria-label', this.getAttribute('kat-aria-label') || '');
       input.value = this.getAttribute('value') || '';
       input.disabled = this.hasAttribute('disabled');
+      input.addEventListener('keydown', event => { if (event.isTrusted) this.lastKey = Date.now(); });
       input.addEventListener('input', event => {
         // trustedOnly: like a component that ignores script-made events.
+        // needsKeys: takes input only right after a real key press.
         // noReflect: the edit is taken but the host attribute never changes.
         // rejectInput: the edit is shown in the box but never taken.
         if ((cfg.trustedOnly && !event.isTrusted) || cfg.rejectInput) return;
+        if (cfg.needsKeys && !(this.lastKey && Date.now() - this.lastKey < 1000)) return;
         if (!cfg.noReflect) this.setAttribute('value', input.value);
         this.onKatChange?.(input.value);
       });

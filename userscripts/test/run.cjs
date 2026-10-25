@@ -135,19 +135,32 @@ async function runSeller(context, url, cfg, gm, person = null, timeout = 300000)
 // A person on the Amazon tab: types into the highlighted box and presses
 // 保存 / 変更を送信 when the script says so.
 const said = (page, words, timeout) => page.waitForFunction(w => document.getElementById('pm30-status')?.textContent.includes(w), words, { timeout });
-async function personRound(page, { value = '30', price = null, waitPrompt = 240000 } = {}) {
-  await said(page, '30 と打って', waitPrompt);
-  const box = page.locator('kat-input#max_order_quantity-0-value input');
-  await box.fill('');
-  await box.pressSequentially(value);
-  if (price) await page.locator('kat-input#purchasable_offer-0-our_price input').fill(price);
-  await page.mouse.click(5, 5);
-  await page.waitForTimeout(800);
+async function personRound(page, { value = null, price = null, waitPrompt = 240000 } = {}) {
+  // Waits for the script's guidance; types only when asked (or when the test
+  // wants a specific value), then presses 保存 and 変更を送信.
+  await page.waitForFunction(() => /30 と打って|「保存」を押して|「変更を送信」を押して/
+    .test(document.getElementById('pm30-status')?.textContent || ''), null, { timeout: waitPrompt });
+  const asked = await page.evaluate(() => document.getElementById('pm30-status').textContent.includes('30 と打って'));
+  const typed = asked || value !== null || price !== null;
+  if (typed) {
+    const box = page.locator('kat-input#max_order_quantity-0-value input');
+    await box.fill('');
+    await box.pressSequentially(value ?? '30');
+    if (price) await page.locator('kat-input#purchasable_offer-0-our_price input').fill(price);
+    await page.mouse.click(5, 5);
+    await page.waitForTimeout(800);
+  }
+  const how = typed ? 'typed' : 'auto';
   await page.locator('kat-button[data-testid="kat-button-save"]').click();
-  if (value !== '30' || price) return said(page, 'この操作は止めました', 5000).then(() => 'save-blocked', () => 'save-allowed');
+  if ((value ?? '30') !== '30' || price) {
+    return said(page, 'この操作は止めました', 5000).then(() => how + '-save-blocked', () => how + '-save-allowed');
+  }
   const ready = await said(page, '「変更を送信」を押して', 30000).then(() => true, () => false);
   await page.locator('#form-submit-button').click();
-  return ready ? 'sent' : 'forced';
+  // Let the guidance move on, so a next round does not act on this one's text.
+  await page.waitForFunction(() => !(document.getElementById('pm30-status')?.textContent || '').includes('「変更を送信」を押して'),
+    null, { timeout: 60000 }).catch(() => {});
+  return how + (ready ? '-sent' : '-forced');
 }
 const person = (...rounds) => ({ act: async page => { const out = []; for (const r of rounds) out.push(await personRound(page, r)); return out; } });
 const typesThenStops = (round, extra = async () => {}) => ({ endWhenDone: true, act: async page => {
@@ -174,13 +187,16 @@ function verdict(name, result, expect) {
   if (expect.tamper && submits) problems.push('submitted although another field changed');
   if (expect.opened !== undefined && result.opened !== expect.opened) problems.push(`opened=${result.opened} (expected ${expect.opened})`);
   if (expect.label && result.label !== expect.label) problems.push(`button="${result.label}" (expected "${expect.label}")`);
+  const first = Array.isArray(result.person) ? result.person[0] : result.person;
+  if (expect.typed !== undefined && !String(first).startsWith(expect.typed ? 'typed' : 'auto')) problems.push(`person=${first} (expected ${expect.typed ? 'typed' : 'auto'})`);
+  if (expect.diag && !(result.job?.message || '').includes(expect.diag)) problems.push(`diagnosis lacks "${expect.diag}"`);
   return { name, ok: problems.length === 0, state, submits, errors: errors.length, problems,
     message: (result.job?.message || '').replace(/\n/g, ' / '), label: result.label, panels: result.panels };
 }
 
 const P = person({});
 const sellerScenarios = [
-  { name: 'normal', cfg: {}, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'normal', cfg: {}, person: P, expect: { state: 'verified', submits: 1, clean: true, typed: false } },
   { name: 'already-30', cfg: { initialMax: '30' }, expect: { state: 'verified', submits: 0, clean: true } },
   { name: 'no-success-dialog', cfg: { noDialog: true }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
   { name: 'slow-to-reflect', cfg: { lagLoads: 2 }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
@@ -190,10 +206,14 @@ const sellerScenarios = [
   { name: 'late-cards', cfg: { lateCards: 3000 }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
   { name: 'reloaded-while-editing', cfg: {}, state: 'editing', person: P, expect: { state: 'verified', submits: 1, clean: true } },
   // Amazon ignores input made by scripts: the person's typing still works.
-  { name: 'script-input-ignored', cfg: { trustedOnly: true }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'value-not-reflected', cfg: { noReflect: true }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'script-input-ignored', cfg: { trustedOnly: true }, person: P, expect: { state: 'verified', submits: 1, clean: true, typed: false } },
+  { name: 'value-not-reflected', cfg: { noReflect: true }, person: P,
+    expect: { state: 'verified', submits: 1, clean: true, typed: true, diag: '（★なし）' } },
+  // Only real key presses are taken: the script's entry fails, the person types, the diagnosis records it.
+  { name: 'needs-real-keys', cfg: { needsKeys: true }, person: P,
+    expect: { state: 'verified', submits: 1, clean: true, typed: true, diag: '★' } },
   // Guards: wrong value, another field typed into, Amazon changing another field.
-  { name: 'person-types-31-first', cfg: {}, person: person({ value: '31' }, {}), expect: { state: 'verified', submits: 1, blocked: true } },
+  { name: 'person-types-31-first', cfg: {}, person: person({ value: '31' }, { value: '30' }), expect: { state: 'verified', submits: 1, blocked: true } },
   { name: 'person-changes-price', cfg: {}, person: typesThenStops({ price: '999' }),
     expect: { submits: 0, blocked: true, noPanelSave: true, personTypesPrice: true } },
   { name: 'other-field-changes', cfg: { tamper: true }, person: typesThenStops({}),

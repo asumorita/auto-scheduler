@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         プライスター・購入上限30個
 // @namespace    morit-pricetar-max30
-// @version      1.0.8
+// @version      1.0.9
 // @description  押した行のSKUだけ、Amazon日本の最大注文可能個数を30に設定・再確認します。
 // @match        https://jp3.pricetar.com/seller/product/*
 // @match        https://sellercentral.amazon.co.jp/interactive/listing/workflow/edit/offer*
@@ -17,7 +17,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.0.8';
+  const VERSION = '1.0.9';
   const MAX_ID = 'max_order_quantity-0-value';
   const MAX_LABEL = '最大注文可能個数';
   const MARKET = 'A1VC38T7YXB528';
@@ -61,6 +61,19 @@
     assert(field.input.type === 'number' && !field.input.disabled && !field.input.readOnly,
       '購入上限の欄を編集できません。');
     return field;
+  }
+  function nativeSetter(input) {
+    return Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
+  }
+  function focusedOn(input) {
+    // True only when the focus chain, through every shadow root, ends at input.
+    let node = input;
+    while (node.getRootNode() !== node.ownerDocument) {
+      const root = node.getRootNode();
+      if (root.activeElement !== node) return false;
+      node = root.host;
+    }
+    return node.ownerDocument.activeElement === node;
   }
   function readRow(row) {
     const cells = [...row.querySelectorAll(':scope > td')];
@@ -324,7 +337,7 @@
     if (result.state === 'verified') return ['30個 確認済 ✓', '#276c42'];
     if (!terminal(result.state)) {
       if (!liveJob(result.token)) return ['中断／押して再開', '#a23f31'];
-      return result.state === 'waiting' ? ['Amazonで入力待ち', '#b86e00'] : ['確認・設定中…', '#586d79'];
+      return result.state === 'waiting' ? ['Amazonで操作待ち', '#b86e00'] : ['確認・設定中…', '#586d79'];
     }
     if (result.state === 'pending') return ['反映待ち／押して再確認', '#946718'];
     return ['エラー／押して再実行', '#a23f31'];
@@ -514,8 +527,8 @@
     checkNoErrors();
     const field = maxField(document);
     if (field.input.value === '30') {
-      writeJob(job, 'verified', 'Amazon編集画面を開き、最大注文可能個数30を確認しました。');
-      panel('購入上限30個：確認完了 ✓\n' + job.title + '\nSKU：' + job.sku);
+      writeJob(job, 'verified', 'Amazon編集画面を開き、最大注文可能個数30を確認しました。' + diagText(job));
+      panel('購入上限30個：確認完了 ✓\n' + job.title + '\nSKU：' + job.sku + diagText(job));
       field.input.scrollIntoView({ block: 'center' });
       return;
     }
@@ -546,9 +559,14 @@
     onlyExpectedEdit(editCounts(document), 0);
     checkNoErrors();
     const oldMax = maxField(document).input.value;
-    job.step = 'あなたの入力待ち';
-    writeJob(job, 'waiting', 'Amazonの画面で、黄色い枠の「最大注文可能個数」に 30 と打ってください。', { oldMax });
-    await handOver(job, layout, before);
+    job.oldMax = oldMax;
+    job.step = '30の自動入力';
+    panel('「最大注文可能個数」に30を入れています。\nSKU：' + job.sku);
+    const auto = await tryScriptEntry(job, layout);
+    job.step = 'あなたの操作待ち';
+    writeJob(job, 'waiting', auto ? '30を入れました。案内どおりに「保存」「変更を送信」を押してください。'
+      : 'Amazonの画面で、黄色い枠の「最大注文可能個数」に 30 と打ってください。', { oldMax });
+    await handOver(job, layout, before, auto);
     job.step = '送信結果の確認';
     // The read-back after reloading is the real proof, so a missing or reworded
     // completion dialog is not an error.
@@ -560,7 +578,53 @@
     panel(job.message + '\nSKU：' + job.sku);
     return reloadAfter(VERIFY_WAITS[0]);
   }
-  function handOver(job, layout, before) {
+  function diagText(job) {
+    const d = job.diag;
+    return d ? `\n診断：場所=${d.world}／自動=${d.script}／手入力=${d.person ?? 'なし'}${d.after ? '／' + d.after : ''}` : '';
+  }
+  async function tryScriptEntry(job, layout) {
+    // Tries to put 30 in for the person. It counts only when Amazon clearly
+    // took it: in the panel the box's own value turns 30, on the one-page form
+    // the 出品情報 count goes up. Otherwise the person types it.
+    const offerEdits = () => editCounts(document).find(([id]) => id === 'hub-item-box-offer')?.[1] ?? 0;
+    const taken = () => maxField(document).input.value === '30'
+      && (layout.panel ? maxField(document).host.getAttribute('value') === '30' : offerEdits() > 0);
+    const ways = [
+      ['キー入力', input => {
+        // Trusted input events, like a person typing. execCommand types into
+        // whatever has focus, so first make sure that is exactly this box.
+        input.focus();
+        assert(focusedOn(input), '欄を選択できず');
+        nativeSetter(input).call(input, '');
+        assert(input.ownerDocument.execCommand('insertText', false, '30'), '入力命令が使えず');
+        input.blur();
+      }],
+      ['直接', input => {
+        input.focus();
+        nativeSetter(input).call(input, '30');
+        input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        input.blur();
+      }],
+    ];
+    const notes = [];
+    job.diag = { world: window.customElements?.get?.('kat-input') ? 'ページ内' : '別室', script: '' };
+    for (const [name, write] of ways) {
+      let note;
+      try {
+        write(maxField(document).input);
+        note = await until(taken, 4000).then(() => '受理', () => '受理されず');
+      } catch (e) { note = '失敗（' + e.message + '）'; }
+      notes.push(`${name}:${note}`);
+      job.diag.script = notes.join('、');
+      if (note === '受理') return true;
+    }
+    // Show the box as Amazon has it, so the person starts from the real value.
+    const { input } = maxField(document);
+    nativeSetter(input).call(input, job.oldMax || '');
+    return false;
+  }
+  function handOver(job, layout, before, auto) {
     // Amazon shows a 30 typed by a script but never records it, so the person
     // types 30 and makes the final clicks. The script guides, and stops any
     // 保存 or 変更を送信 click that would send anything but 最大注文可能個数 = 30.
@@ -590,10 +654,33 @@
     const doneDialog = () => deepAll(document, '[role="dialog"],kat-modal').some(d => text(d).includes('編集内容が送信されました'));
     const mark = () => failure(() => { maxField(document).host.style.outline = '4px solid #f0b400'; });
     mark();
-    const { input } = maxField(document);
+    const { input, host } = maxField(document);
     input.scrollIntoView({ block: 'center' });
-    input.focus();
-    try { input.select(); } catch { /* not every input type supports select() */ }
+    if (!auto) {
+      input.focus();
+      try { input.select(); } catch { /* not every input type supports select() */ }
+    }
+    // When the person types, note how Amazon's box reacts (★ = Amazon took
+    // the 30), so a later version can type it the same way.
+    const codes = { keydown: '押', beforeinput: '前', input: '入', keyup: '離', change: '変', focusout: '外' };
+    const events = [];
+    let tookIt = false, lastAttr = host.getAttribute('value');
+    const record = e => { if (events.length < 40) events.push(codes[e.type] + (e.isTrusted ? '' : '*')); };
+    if (!auto) for (const type of Object.keys(codes)) input.addEventListener(type, record, true);
+    const probe = auto ? null : setInterval(() => failure(() => {
+      lastAttr = maxField(document).host.getAttribute('value');
+      const took = layout.panel ? lastAttr === '30' : offerEdits() > 0;
+      if (took && !tookIt) { tookIt = true; events.push('★'); }
+    }), 100);
+    let watching = !auto;
+    const stopWatching = () => {
+      if (!watching) return;
+      watching = false;
+      clearInterval(probe);
+      for (const type of Object.keys(codes)) input.removeEventListener(type, record, true);
+      job.diag.person = (events.join('') || '記録なし') + (tookIt ? '' : '（★なし）');
+      job.diag.after = `属性=${lastAttr ?? 'なし'}・件数=${failure(() => offerEdits()) ? '?' : offerEdits()}`;
+    };
 
     return new Promise((resolve, reject) => {
       let shown = '', hold = 0, timer = null;
@@ -617,17 +704,19 @@
         if (why) return say(`⚠ ${why}\n${open ? 'パネル' : '左下'}の「キャンセル」で取り消してから、やり直してください。`, true);
         const value = maxField(document).input.value;
         if (value !== '30') return say('① 黄色い枠の「最大注文可能個数」に 30 と打ってください。' + (value ? `（いまの値：${value}）` : ''));
-        if (open) return say('② 30を確認しました。パネルの「保存」を押してください。');
+        if (open) return say(`② ${auto ? '30を入れました' : '30を確認しました'}。パネルの「保存」を押してください。`);
         if (offerEdits() === 0) return say('② 30を確認しました。欄の外をクリックしてください。');
         return step3(failure(sendOk));
       };
       const finish = error => {
+        stopWatching();
         clearInterval(timer);
         window.removeEventListener('click', onClick, true);
         failure(() => { maxField(document).host.style.outline = ''; });
         if (error) reject(error); else resolve();
       };
       const sending = () => {
+        stopWatching();
         // Persist BEFORE Amazon handles the click; after a crash the next
         // load only reads the value back.
         writeJob(job, 'submitting', '購入上限30個だけを送信しています。',

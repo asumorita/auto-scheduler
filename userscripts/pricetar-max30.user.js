@@ -566,7 +566,6 @@
     // 保存 or 変更を送信 click that would send anything but 最大注文可能個数 = 30.
     const failure = check => { try { check(); return null; } catch (e) { return e.message; } };
     const offerEdits = () => editCounts(document).find(([id]) => id === 'hub-item-box-offer')?.[1] ?? 0;
-    const notReady = 'Amazonの確認がまだです。左下のボタンが「変更を送信」に変わってから押してください。';
     const othersUnchanged = () => {
       checkIdentity(document, location.href, job);
       sameProtected(before, protectedSnapshot(document));
@@ -587,8 +586,8 @@
       assert(offerEdits() > 0, 'まだAmazonに30が入っていません。');
       onlyExpectedEdit(editCounts(document), 1);
       checkNoErrors();
-      assert(readySubmit(document), notReady);
     };
+    const doneDialog = () => deepAll(document, '[role="dialog"],kat-modal').some(d => text(d).includes('編集内容が送信されました'));
     const mark = () => failure(() => { maxField(document).host.style.outline = '4px solid #f0b400'; });
     mark();
     const { input } = maxField(document);
@@ -603,9 +602,9 @@
         shown = message;
         panel(message + '\nSKU：' + job.sku, error);
       };
-      const step3 = why => !why ? say('③ 左下の「変更を送信」を押してください。')
-        : why === notReady ? say('③ Amazonの確認待ちです。左下のボタンが「変更を送信」に変わったら押してください。')
-          : say('⚠ ' + why + '\n左下の「キャンセル」で取り消してから、やり直してください。', true);
+      const step3 = why => why ? say('⚠ ' + why + '\n左下の「キャンセル」で取り消してから、やり直してください。', true)
+        : say(readySubmit(document) ? '③ 左下の「変更を送信」を押してください。'
+          : '③ Amazonの確認待ちです。左下のボタンが「変更を送信」に変わったら押してください。');
       const guide = () => {
         mark();
         const open = layout.panel && !!offerPanel(document);
@@ -628,8 +627,17 @@
         failure(() => { maxField(document).host.style.outline = ''; });
         if (error) reject(error); else resolve();
       };
+      const sending = () => {
+        // Persist BEFORE Amazon handles the click; after a crash the next
+        // load only reads the value back.
+        writeJob(job, 'submitting', '購入上限30個だけを送信しています。',
+          { submittedAt: Date.now(), submits: (job.submits || 0) + 1, checks: 0 });
+        finish();
+      };
       const tick = () => {
         if (Date.now() - job.createdAt >= TTL) return finish(new Error('入力待ちの時間を過ぎました。ボタンをもう一度押してください。'));
+        // A send that went through while the button looked "not ready".
+        if (doneDialog()) return sending();
         const why = failure(guide);
         if (why) say('確認中：' + why);
       };
@@ -651,13 +659,9 @@
           hold = Date.now() + 6000;
           return;
         }
-        if (kind === 'send') {
-          // Persist BEFORE Amazon handles the click; after a crash the next
-          // load only reads the value back.
-          writeJob(job, 'submitting', '購入上限30個だけを送信しています。',
-            { submittedAt: Date.now(), submits: (job.submits || 0) + 1, checks: 0 });
-          finish();
-        }
+        // When the button does not look ready yet, Amazon decides; the
+        // completion dialog (watched in tick) tells whether it was sent.
+        if (kind === 'send' && readySubmit(document)) sending();
       };
       window.addEventListener('click', onClick, true);
       timer = setInterval(tick, 700);

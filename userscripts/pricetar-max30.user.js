@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         プライスター・購入上限30個
 // @namespace    morit-pricetar-max30
-// @version      1.0.7
+// @version      1.0.8
 // @description  押した行のSKUだけ、Amazon日本の最大注文可能個数を30に設定・再確認します。
 // @match        https://jp3.pricetar.com/seller/product/*
 // @match        https://sellercentral.amazon.co.jp/interactive/listing/workflow/edit/offer*
@@ -17,7 +17,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.8';
   const MAX_ID = 'max_order_quantity-0-value';
   const MAX_LABEL = '最大注文可能個数';
   const MARKET = 'A1VC38T7YXB528';
@@ -177,33 +177,6 @@
       '日本の編集パネルではないため中止しました。');
     return panel;
   }
-  function panelAction(panel, action) {
-    assert(panel, '編集パネルが閉じたため中止しました。');
-    assert(['save', 'cancel'].includes(action), 'パネル操作が不明です。');
-    const button = unique([...panel.querySelectorAll('kat-button[data-testid="kat-button-' + action + '"]')], 'パネルの操作ボタンを確認できません。');
-    assert(button.getAttribute('label') === (action === 'save' ? '保存' : 'キャンセル')
-      && button.getAttribute('type') === 'button', 'パネルの操作ボタンの形式が異なります。');
-    return button;
-  }
-  function readyPanelAction(panel, action) {
-    assert(['save', 'cancel'].includes(action), 'パネル操作が不明です。');
-    if (!panel) return null;
-    const buttons = [...panel.querySelectorAll('kat-button[data-testid="kat-button-' + action + '"]')];
-    if (!buttons.length) return null;
-    const button = unique(buttons, 'パネルの操作ボタンが複数あるため中止しました。');
-    // Amazon can replace its button after an input event. The custom element
-    // adds its type and final localized label asynchronously. A different
-    // label/type must never be clicked; wait for the EXACT expected values.
-    const label = button.getAttribute('label');
-    const type = button.getAttribute('type');
-    if (label !== (action === 'save' ? '保存' : 'キャンセル') || type !== 'button'
-      || !shown(button) || button.hasAttribute('disabled')) return null;
-    const natives = button.shadowRoot?.querySelectorAll('button');
-    if (!natives?.length) return null;
-    const native = unique([...natives], 'パネルの操作ボタンを一意に確認できません。');
-    if (native.type !== 'button' || native.disabled) return null;
-    return panelAction(panel, action);
-  }
   function outsidePanelSnapshot(doc) {
     const button = sourceEditButton(doc);
     assert(button, '日本のメイン出品カードが見つかりません。');
@@ -231,41 +204,7 @@
   function sameProtected(before, after) {
     if (before === after) return;
     const changed = snapshotDiff(before, after);
-    throw new Error('購入上限以外の入力欄に変化を検出したため、保存を中止しました。' + (changed ? '\n変化：' + changed : ''));
-  }
-  function setOnlyMax(doc) {
-    const { host, input } = maxField(doc);
-    input.focus();
-    const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
-    setter.call(input, '30');
-    input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    input.blur();
-    assert(input.value === '30', '購入上限の入力に失敗しました。');
-    return host;
-  }
-  function focusedOn(input) {
-    // True only when the focus chain, through every shadow root, ends at input.
-    let node = input;
-    while (node.getRootNode() !== node.ownerDocument) {
-      const root = node.getRootNode();
-      if (root.activeElement !== node) return false;
-      node = root.host;
-    }
-    return node.ownerDocument.activeElement === node;
-  }
-  function typeMax(doc) {
-    // Types 30 the way a person would, for components that ignore events made
-    // by scripts. execCommand types into whatever has focus, so first make
-    // sure that is exactly the 購入上限 box and nothing else.
-    const { input } = maxField(doc);
-    input.focus();
-    assert(focusedOn(input), '購入上限の欄を選択できません。');
-    const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
-    setter.call(input, '');
-    const typed = doc.execCommand('insertText', false, '30');
-    input.blur();
-    assert(typed && input.value === '30', '購入上限の入力に失敗しました。');
+    throw new Error('購入上限以外の入力欄が変わっています。' + (changed ? '\n変化：' + changed : ''));
   }
   function clickKat(host) {
     assert(host && shown(host) && !host.hasAttribute('disabled'), '操作ボタンを確認できません。');
@@ -284,29 +223,6 @@
       || !shown(host) || host.hasAttribute('disabled')) return null;
     const native = host.shadowRoot?.querySelector('button');
     return native && !native.disabled ? host : null;
-  }
-  async function waitSubmitReady(doc, guard, timeout = 45000, stableMs = 1200) {
-    const end = Date.now() + timeout;
-    let previous = null, since = 0, last = null;
-    while (Date.now() < end) {
-      // Closing Amazon's verification panel can briefly leave a stale ready
-      // button, then trigger a new validation cycle. Require stable readiness
-      // with every guard passing for the whole period. A guard that fails only
-      // while Amazon re-renders restarts the period; the caller repeats the
-      // guard strictly right before clicking.
-      let button = null;
-      try { guard(); button = readySubmit(doc); last = null; } catch (e) { last = e; }
-      if (button && button === previous) {
-        if (Date.now() - since >= stableMs) return button;
-      } else {
-        since = Date.now();
-      }
-      previous = button;
-      await sleep(400);
-    }
-    const host = doc.getElementById('form-submit-button');
-    throw new Error('Amazonの送信準備が45秒以内に安定しませんでした。送信はしていません。\n'
-      + '送信ボタンの表示：' + (text(host) || '未表示') + (last ? '\n' + last.message : ''));
   }
   async function until(fn, timeout = 45000, what = '画面の読み込み・確認') {
     // Amazon re-renders its custom elements while loading, so a check that
@@ -344,10 +260,8 @@
 
   // CommonJS export supports offline checks. In a normal userscript this branch is absent.
   const api = { VERSION, MAX_ID, clean, readRow, editUrl, checkPageIdentity, checkIdentity, editCounts,
-    onlyExpectedEdit, protectedSnapshot, sameProtected, snapshotDiff, maxField, setOnlyMax, typeMax, focusedOn,
-    deepAll, readySubmit,
-    until, settled, sourceEditButton, offerPanel, panelAction, readyPanelAction, outsidePanelSnapshot, withinPanel,
-    waitSubmitReady };
+    onlyExpectedEdit, protectedSnapshot, sameProtected, snapshotDiff, maxField, deepAll, readySubmit,
+    until, settled, sourceEditButton, offerPanel, outsidePanelSnapshot, withinPanel };
   if (typeof module === 'object' && module.exports) { module.exports = api; return; }
 
   // Run once per page, even if the script was pasted into itself or installed
@@ -391,7 +305,10 @@
     let box = document.getElementById('pm30-status');
     if (!box) {
       box = document.createElement('div'); box.id = 'pm30-status'; box.setAttribute('role', 'status');
-      box.style.cssText = 'position:fixed;right:16px;bottom:18px;z-index:2147483647;max-width:380px;padding:15px 18px;border-radius:10px;box-shadow:0 3px 18px #0003;font:14px/1.65 sans-serif;white-space:pre-wrap;pointer-events:none;';
+      // On Seller Central the box sits top-left, clear of 保存 and 変更を送信.
+      const place = location.hostname === 'sellercentral.amazon.co.jp'
+        ? 'left:12px;top:64px;max-width:300px;' : 'right:16px;bottom:18px;max-width:380px;';
+      box.style.cssText = 'position:fixed;' + place + 'z-index:2147483647;padding:15px 18px;border-radius:10px;box-shadow:0 3px 18px #0003;font:14px/1.65 sans-serif;white-space:pre-wrap;pointer-events:none;';
       document.body.append(box);
     }
     box.style.background = error ? '#fff0ed' : '#f0faf9';
@@ -405,7 +322,10 @@
   function shortStatus(result) {
     if (!result) return ['購入上限30個', '#137e83'];
     if (result.state === 'verified') return ['30個 確認済 ✓', '#276c42'];
-    if (!terminal(result.state)) return liveJob(result.token) ? ['確認・設定中…', '#586d79'] : ['中断／押して再開', '#a23f31'];
+    if (!terminal(result.state)) {
+      if (!liveJob(result.token)) return ['中断／押して再開', '#a23f31'];
+      return result.state === 'waiting' ? ['Amazonで入力待ち', '#b86e00'] : ['確認・設定中…', '#586d79'];
+    }
     if (result.state === 'pending') return ['反映待ち／押して再確認', '#946718'];
     return ['エラー／押して再実行', '#a23f31'];
   }
@@ -437,7 +357,7 @@
             GM_setValue(PREFIX + 'lock', { token, at: Date.now() });
             writeJob(job, 'queued', 'AmazonのSKUを確認しています。');
             GM_openInTab(editUrl(target, token), { active: true, insert: true, setParent: true });
-            panel(`${target.title}\nSKU：${target.sku}\nAmazonで購入上限30個を確認・設定します。`);
+            panel(`${target.title}\nSKU：${target.sku}\nAmazonの画面を開きます。30でなければ、黄色い枠に 30 と打って、案内どおりに押してください。`);
             addButtons();
           } catch (e) { panel(e.message, true); }
         });
@@ -516,54 +436,6 @@
       }
     }
   }
-  async function savePanelAndVerify(job, before, outside) {
-    const checkPanel = edits => {
-      checkIdentity(document, location.href, job);
-      onlyExpectedEdit(editCounts(document), edits);
-      sameProtected(before, protectedSnapshot(document));
-      sameProtected(outside, outsidePanelSnapshot(document));
-      checkNoErrors();
-      assert(maxField(document).input.value === '30', '購入上限の値が30ではありません。');
-    };
-    await waitPanelAction('save', () => checkPanel(0));
-    checkPanel(0);
-    const save = readyPanelAction(offerPanel(document), 'save');
-    assert(save, 'パネルの保存ボタンが切り替わったため中止しました。');
-    clickKat(save);
-    await until(() => {
-      if (offerPanel(document)) return false;
-      const counts = editCounts(document);
-      if (counts.some(([id, count]) => id === 'hub-item-box-offer' && count === 0)) return false;
-      onlyExpectedEdit(counts, 1);
-      return true;
-    }, 30000, 'パネル保存の反映');
-    await until(() => { sameProtected(outside, outsidePanelSnapshot(document)); return true; }, 10000, 'メイン出品カードの照合');
-    await until(() => readySubmit(document), 45000, '送信ボタンの準備');
-    // Panel Save only stages the edit. Reopen it to validate the staged values,
-    // then close with Cancel (no local edits) before the final submission.
-    await allFields(job, 1);
-    await waitPanelAction('cancel', () => checkPanel(1));
-    checkPanel(1);
-    const cancel = readyPanelAction(offerPanel(document), 'cancel');
-    assert(cancel, 'パネルのキャンセルボタンが切り替わったため中止しました。');
-    clickKat(cancel);
-    await until(() => !offerPanel(document), 20000, '編集パネルを閉じる操作');
-  }
-  async function waitPanelAction(action, check) {
-    // Waits until the button is ready AND every check passes at the same time.
-    let observed = 'ボタン未表示';
-    try {
-      return await until(() => {
-        const p = offerPanel(document);
-        const b = p?.querySelector('kat-button[data-testid="kat-button-' + action + '"]');
-        observed = b ? `表示=${JSON.stringify(b.getAttribute('label'))}、種類=${JSON.stringify(b.getAttribute('type'))}` : 'ボタン未表示';
-        check();
-        return readyPanelAction(p, action);
-      }, 20000, `パネルの${action === 'save' ? '保存' : 'キャンセル'}前の照合`);
-    } catch (e) {
-      throw new Error(`${e.message}\nパネルの${action === 'save' ? '保存' : 'キャンセル'}準備：${observed}`);
-    }
-  }
   function checkNoErrors() {
     const errors = [...document.querySelectorAll('[data-testid="fieldError"]')].filter(x => text(x));
     assert(errors.length === 0, 'Amazonの入力エラーがあるため、保存を中止しました。');
@@ -633,7 +505,7 @@
     }
     const sent = ['submitting', 'submitted'].includes(job.state);
     if (sent) writeJob(job, job.state, job.message);
-    else writeJob(job, 'opening', 'AmazonのSKUと入力欄を確認しています。' + tries(job), { inputNote: '' });
+    else writeJob(job, 'opening', 'AmazonのSKUと入力欄を確認しています。' + tries(job));
     panel((sent ? '送信した値を確認しています。' : '購入上限30個：確認中' + tries(job)) + '\nSKU：' + job.sku);
     job.step = 'Amazon画面の確認';
     const layout = await allFields(job);
@@ -662,7 +534,7 @@
         panel(job.message + '\nSKU：' + job.sku, true);
         return;
       }
-      // Sending 30 again is harmless (same value), and every guard still applies.
+      // Ask for 30 once more; sending the same value twice is harmless.
       job.attempt = 1;
     }
     await setAndSubmit(job, layout);
@@ -674,40 +546,9 @@
     onlyExpectedEdit(editCounts(document), 0);
     checkNoErrors();
     const oldMax = maxField(document).input.value;
-    writeJob(job, 'editing', '最大注文可能個数だけを30に入力しています。' + tries(job), { oldMax, inputNote: '' });
-    job.step = '購入上限の入力';
-    await enterMax(job, layout);
-    if (layout.panel) {
-      job.step = 'パネルの保存と照合';
-      panel('日本の編集パネルで購入上限だけを保存・照合しています。\nSKU：' + job.sku);
-      await savePanelAndVerify(job, before, layout.outside);
-    }
-    // Amazon validates asynchronously: the edit count becomes 1 before
-    // the button changes from 送信 to 変更を送信 and sets its ready flag.
-    // Wait for that state, then repeat ALL protection checks immediately
-    // before clicking. Never weaken the guard or click the initial button.
-    job.step = '送信ボタンの準備待ち';
-    panel('Amazonの保存準備が完了するのを待っています。\nSKU：' + job.sku);
-    const validateBeforeSubmit = () => {
-      if (layout.panel) {
-        checkPageIdentity(document, location.href, job);
-        assert(!offerPanel(document), '編集パネルが開いたため送信を中止しました。');
-        sameProtected(layout.outside, outsidePanelSnapshot(document));
-      } else {
-        checkIdentity(document, location.href, job);
-        sameProtected(before, protectedSnapshot(document));
-        assert(maxField(document).input.value === '30', '購入上限の値が30ではありません。');
-      }
-      onlyExpectedEdit(editCounts(document), 1);
-      checkNoErrors();
-    };
-    const submit = await waitSubmitReady(document, validateBeforeSubmit);
-    validateBeforeSubmit();
-    assert(readySubmit(document) === submit, '保存ボタンの状態が変わったため中止しました。');
-    // Persist BEFORE click; after a crash the next load only reads the value back.
-    writeJob(job, 'submitting', '購入上限30個だけを送信しています。',
-      { submittedAt: Date.now(), submits: (job.submits || 0) + 1, checks: 0 });
-    clickKat(submit);
+    job.step = 'あなたの入力待ち';
+    writeJob(job, 'waiting', 'Amazonの画面で、黄色い枠の「最大注文可能個数」に 30 と打ってください。', { oldMax });
+    await handOver(job, layout, before);
     job.step = '送信結果の確認';
     // The read-back after reloading is the real proof, so a missing or reworded
     // completion dialog is not an error.
@@ -719,26 +560,115 @@
     panel(job.message + '\nSKU：' + job.sku);
     return reloadAfter(VERIFY_WAITS[0]);
   }
-  async function enterMax(job, layout) {
-    // Amazon has to take the edit, not just display it. Type like a person
-    // first, then fall back to setting the value with script events.
-    const taken = () => maxField(document).host.getAttribute('value') === '30'
-      && (layout.panel || editCounts(document).some(([id, n]) => id === 'hub-item-box-offer' && n === 1));
-    for (const write of [typeMax, setOnlyMax]) {
-      try { write(document); } catch { continue; }
-      if (await until(taken, 6000).then(() => true, () => false)) return;
-    }
-    const { host, input } = maxField(document);
-    job.inputNote = `購入上限の欄：表示=${input.value || '空欄'}、項目の値=${host.getAttribute('value') ?? 'なし'}、元の値=${job.oldMax || '空欄'}`;
-    // In the panel, Amazon's own edit count after 保存 proves whether it took
-    // the edit, and that is checked before anything is sent.
-    assert(layout.panel && input.value === '30', '購入上限30の入力が反映されませんでした。');
+  function handOver(job, layout, before) {
+    // Amazon shows a 30 typed by a script but never records it, so the person
+    // types 30 and makes the final clicks. The script guides, and stops any
+    // 保存 or 変更を送信 click that would send anything but 最大注文可能個数 = 30.
+    const failure = check => { try { check(); return null; } catch (e) { return e.message; } };
+    const offerEdits = () => editCounts(document).find(([id]) => id === 'hub-item-box-offer')?.[1] ?? 0;
+    const notReady = 'Amazonの確認がまだです。左下のボタンが「変更を送信」に変わってから押してください。';
+    const othersUnchanged = () => {
+      checkIdentity(document, location.href, job);
+      sameProtected(before, protectedSnapshot(document));
+      checkNoErrors();
+    };
+    const typedOk = () => {
+      othersUnchanged();
+      assert(maxField(document).input.value === '30', '最大注文可能個数が30になっていません。');
+    };
+    const sendOk = () => {
+      if (layout.panel) {
+        checkPageIdentity(document, location.href, job);
+        assert(!offerPanel(document), '編集パネルが開いています。先にパネルの「保存」を押してください。');
+        sameProtected(layout.outside, outsidePanelSnapshot(document));
+      } else {
+        typedOk();
+      }
+      assert(offerEdits() > 0, 'まだAmazonに30が入っていません。');
+      onlyExpectedEdit(editCounts(document), 1);
+      checkNoErrors();
+      assert(readySubmit(document), notReady);
+    };
+    const mark = () => failure(() => { maxField(document).host.style.outline = '4px solid #f0b400'; });
+    mark();
+    const { input } = maxField(document);
+    input.scrollIntoView({ block: 'center' });
+    input.focus();
+    try { input.select(); } catch { /* not every input type supports select() */ }
+
+    return new Promise((resolve, reject) => {
+      let shown = '', hold = 0, timer = null;
+      const say = (message, error = false) => {
+        if (message === shown || Date.now() < hold) return;
+        shown = message;
+        panel(message + '\nSKU：' + job.sku, error);
+      };
+      const step3 = why => !why ? say('③ 左下の「変更を送信」を押してください。')
+        : why === notReady ? say('③ Amazonの確認待ちです。左下のボタンが「変更を送信」に変わったら押してください。')
+          : say('⚠ ' + why + '\n左下の「キャンセル」で取り消してから、やり直してください。', true);
+      const guide = () => {
+        mark();
+        const open = layout.panel && !!offerPanel(document);
+        if (layout.panel && !open) {
+          if (offerEdits() === 0) return say('① 日本の「編集」を押して、「最大注文可能個数」に 30 と打ってください。');
+          return step3(failure(sendOk));
+        }
+        if (failure(() => maxField(document))) return say('① 「最大注文可能個数」の欄が見えません。項目の表示を「すべて」にしてください。');
+        const why = failure(othersUnchanged);
+        if (why) return say(`⚠ ${why}\n${open ? 'パネル' : '左下'}の「キャンセル」で取り消してから、やり直してください。`, true);
+        const value = maxField(document).input.value;
+        if (value !== '30') return say('① 黄色い枠の「最大注文可能個数」に 30 と打ってください。' + (value ? `（いまの値：${value}）` : ''));
+        if (open) return say('② 30を確認しました。パネルの「保存」を押してください。');
+        if (offerEdits() === 0) return say('② 30を確認しました。欄の外をクリックしてください。');
+        return step3(failure(sendOk));
+      };
+      const finish = error => {
+        clearInterval(timer);
+        window.removeEventListener('click', onClick, true);
+        failure(() => { maxField(document).host.style.outline = ''; });
+        if (error) reject(error); else resolve();
+      };
+      const tick = () => {
+        if (Date.now() - job.createdAt >= TTL) return finish(new Error('入力待ちの時間を過ぎました。ボタンをもう一度押してください。'));
+        const why = failure(guide);
+        if (why) say('確認中：' + why);
+      };
+      const onClick = event => {
+        if (!event.isTrusted) return;
+        const path = event.composedPath();
+        const submit = document.getElementById('form-submit-button');
+        let save = null;
+        failure(() => { save = offerPanel(document)?.querySelector('kat-button[data-testid="kat-button-save"]'); });
+        const kind = submit && path.includes(submit) ? 'send' : save && path.includes(save) ? 'save' : null;
+        if (!kind) return;
+        const why = failure(kind === 'send' ? sendOk : typedOk);
+        if (why) {
+          // Stopped in the capture phase, so Amazon never sees the click.
+          event.stopImmediatePropagation();
+          event.preventDefault();
+          shown = '';
+          panel('⚠ この操作は止めました。\n' + why + '\nSKU：' + job.sku, true);
+          hold = Date.now() + 6000;
+          return;
+        }
+        if (kind === 'send') {
+          // Persist BEFORE Amazon handles the click; after a crash the next
+          // load only reads the value back.
+          writeJob(job, 'submitting', '購入上限30個だけを送信しています。',
+            { submittedAt: Date.now(), submits: (job.submits || 0) + 1, checks: 0 });
+          finish();
+        }
+      };
+      window.addEventListener('click', onClick, true);
+      timer = setInterval(tick, 700);
+      tick();
+    });
   }
   async function recover(job, e) {
     // No rollback. Protected fields are never written, even on failure. Before
     // sending, a fresh page load discards everything; after sending, only the
     // value is read back (a new send happens only in work(), after read-backs).
-    const detail = (job.step ? `［${job.step}］` : '') + e.message + (job.inputNote ? '\n' + job.inputNote : '');
+    const detail = (job.step ? `［${job.step}］` : '') + e.message;
     const expired = Date.now() - job.createdAt >= TTL;
     if (['submitting', 'submitted'].includes(job.state)) {
       job.checks = (job.checks || 0) + 1;

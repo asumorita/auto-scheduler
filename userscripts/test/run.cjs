@@ -102,16 +102,19 @@ function seedJob(job) {
 }
 
 // Opens the Seller Central tab for a job and waits until the job ends.
-async function runSeller(context, url, cfg, gm, timeout = 300000) {
+async function runSeller(context, url, cfg, gm, person = null, timeout = 300000) {
   const page = await context.newPage();
   await page.goto(SELLER + '/seed');
   await page.evaluate(c => { localStorage.clear(); localStorage.setItem('mock.cfg', JSON.stringify(c)); }, cfg);
   await loadGm(page, gm);
   await page.goto(url);
   const token = new URL(url).hash.split('=')[1];
+  let personDone = false;
+  const acting = person ? person.act(page).catch(e => ({ error: e.message })).finally(() => { personDone = true; }) : null;
   const end = Date.now() + timeout;
   let job = null;
   while (Date.now() < end) {
+    if (person?.endWhenDone && personDone) break;
     try {
       job = JSON.parse(await page.evaluate(k => localStorage.getItem(k), gmKey('job.' + token)));
       if (job && terminal(job.state)) break;
@@ -126,8 +129,33 @@ async function runSeller(context, url, cfg, gm, timeout = 300000) {
   }));
   let seen;
   for (let i = 0; i < 10 && !seen; i++) seen = await read().catch(() => sleep(500).then(() => null));
-  return { page, job, ...seen, gm: await dumpGm(page) };
+  return { page, job, ...seen, gm: await dumpGm(page), person: acting ? await acting : null };
 }
+
+// A person on the Amazon tab: types into the highlighted box and presses
+// 保存 / 変更を送信 when the script says so.
+const said = (page, words, timeout) => page.waitForFunction(w => document.getElementById('pm30-status')?.textContent.includes(w), words, { timeout });
+async function personRound(page, { value = '30', price = null, waitPrompt = 240000 } = {}) {
+  await said(page, '30 と打って', waitPrompt);
+  const box = page.locator('kat-input#max_order_quantity-0-value input');
+  await box.fill('');
+  await box.pressSequentially(value);
+  if (price) await page.locator('kat-input#purchasable_offer-0-our_price input').fill(price);
+  await page.mouse.click(5, 5);
+  await page.waitForTimeout(800);
+  await page.locator('kat-button[data-testid="kat-button-save"]').click();
+  if (value !== '30' || price) return said(page, 'この操作は止めました', 5000).then(() => 'save-blocked', () => 'save-allowed');
+  const ready = await said(page, '「変更を送信」を押して', 30000).then(() => true, () => false);
+  await page.locator('#form-submit-button').click();
+  return ready ? 'sent' : 'forced';
+}
+const person = (...rounds) => ({ act: async page => { const out = []; for (const r of rounds) out.push(await personRound(page, r)); return out; } });
+const typesThenStops = (round, extra = async () => {}) => ({ endWhenDone: true, act: async page => {
+  const out = await personRound(page, round);
+  await extra(page);
+  await page.waitForTimeout(2000);
+  return out;
+} });
 
 function verdict(name, result, expect) {
   const problems = [];
@@ -137,7 +165,9 @@ function verdict(name, result, expect) {
   if (expect.state && state !== expect.state) problems.push(`state=${state} (expected ${expect.state})`);
   if (expect.submits !== undefined && submits !== expect.submits) problems.push(`submits=${submits} (expected ${expect.submits})`);
   if (expect.clean && errors.length) problems.push('error message shown: ' + errors[0].slice(0, 160));
-  if ((result.log || []).some(l => l.startsWith('PRICE-INPUT'))) problems.push('the script typed into the price field');
+  if (!expect.personTypesPrice && (result.log || []).some(l => l.startsWith('PRICE-INPUT'))) problems.push('the price field was typed into');
+  if (expect.blocked && !(result.panels || []).some(p => p.includes('この操作は止めました'))) problems.push('the unsafe click was not stopped');
+  if (expect.noPanelSave && (result.log || []).some(l => l.startsWith('panel-save'))) problems.push('Amazon received 保存 although it should have been stopped');
   for (const line of (result.log || []).filter(l => l.startsWith('SUBMIT '))) {
     if (line !== 'SUBMIT {"max":"30"}' && !expect.tamper) problems.push('unexpected submission ' + line);
   }
@@ -148,27 +178,33 @@ function verdict(name, result, expect) {
     message: (result.job?.message || '').replace(/\n/g, ' / '), label: result.label, panels: result.panels };
 }
 
+const P = person({});
 const sellerScenarios = [
-  { name: 'normal', cfg: {}, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'normal', cfg: {}, person: P, expect: { state: 'verified', submits: 1, clean: true } },
   { name: 'already-30', cfg: { initialMax: '30' }, expect: { state: 'verified', submits: 0, clean: true } },
-  { name: 'no-success-dialog', cfg: { noDialog: true }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'slow-to-reflect', cfg: { lagLoads: 2 }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'first-submit-lost', cfg: { loseSubmits: 1, lagLoads: 0 }, expect: { state: 'verified', submits: 2, clean: true } },
-  { name: 'nav-label-flicker', cfg: { navFlicker: 900 }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'edit-click-lost', cfg: { deadEditClicks: 1 }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'lazy-field', cfg: { lazyField: 1200 }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'late-cards', cfg: { lateCards: 3000 }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'reloaded-while-editing', cfg: {}, state: 'editing', expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'other-field-changes', cfg: { tamper: true }, expect: { state: 'failed', submits: 0, tamper: true } },
-  { name: 'script-input-ignored', cfg: { trustedOnly: true }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'value-not-reflected', cfg: { noReflect: true }, expect: { state: 'verified', submits: 1, clean: true } },
-  { name: 'input-never-taken', cfg: { rejectInput: true }, expect: { state: 'failed', submits: 0 } },
+  { name: 'no-success-dialog', cfg: { noDialog: true }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'slow-to-reflect', cfg: { lagLoads: 2 }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'first-submit-lost', cfg: { loseSubmits: 1, lagLoads: 0 }, person: person({}, {}), expect: { state: 'verified', submits: 2, clean: true } },
+  { name: 'edit-click-lost', cfg: { deadEditClicks: 1 }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'lazy-field', cfg: { lazyField: 1200 }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'late-cards', cfg: { lateCards: 3000 }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'reloaded-while-editing', cfg: {}, state: 'editing', person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  // Amazon ignores input made by scripts: the person's typing still works.
+  { name: 'script-input-ignored', cfg: { trustedOnly: true }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'value-not-reflected', cfg: { noReflect: true }, person: P, expect: { state: 'verified', submits: 1, clean: true } },
+  // Guards: wrong value, another field typed into, Amazon changing another field.
+  { name: 'person-types-31-first', cfg: {}, person: person({ value: '31' }, {}), expect: { state: 'verified', submits: 1, blocked: true } },
+  { name: 'person-changes-price', cfg: {}, person: typesThenStops({ price: '999' }),
+    expect: { submits: 0, blocked: true, noPanelSave: true, personTypesPrice: true } },
+  { name: 'other-field-changes', cfg: { tamper: true }, person: typesThenStops({}),
+    expect: { submits: 0, blocked: true, tamper: true } },
+  { name: 'input-never-taken', cfg: { rejectInput: true }, person: typesThenStops({}), expect: { submits: 0, blocked: true } },
 ];
 
 async function sellerScenario(browser, s) {
   const context = await newContext(browser, []);
   const job = makeJob(ITEMS.first, s.state || 'queued');
-  const result = await runSeller(context, editUrl(ITEMS.first, job.token), s.cfg, seedJob(job));
+  const result = await runSeller(context, editUrl(ITEMS.first, job.token), s.cfg, seedJob(job), s.person);
   await context.close();
   return verdict(s.name, result, s.expect);
 }
@@ -191,7 +227,7 @@ const pricetarScenarios = [
       const page = await pricetarPage(context, {});
       await page.click('#itemInputDataTr_1 .pm30-button');
       await sleep(500);
-      const result = opened.length ? await runSeller(context, opened[0], {}, await dumpGm(page)) : {};
+      const result = opened.length ? await runSeller(context, opened[0], {}, await dumpGm(page), P) : {};
       if (result.gm) await loadGm(page, result.gm);
       await sleep(3000);
       return { ...result, opened: opened.length, label: await label(page, 1) };
@@ -227,7 +263,7 @@ const pricetarScenarios = [
       const page = await pricetarPage(context, { [gmKey('result.' + ITEMS.first.sku)]: JSON.stringify(result0) });
       await page.click('#itemInputDataTr_1 .pm30-button');
       await sleep(500);
-      const result = opened.length ? await runSeller(context, opened[0], {}, await dumpGm(page)) : {};
+      const result = opened.length ? await runSeller(context, opened[0], {}, await dumpGm(page), P) : {};
       if (result.gm) await loadGm(page, result.gm);
       await sleep(3000);
       return { ...result, opened: opened.length, label: await label(page, 1) };

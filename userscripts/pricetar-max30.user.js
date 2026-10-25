@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         プライスター・購入上限30個
 // @namespace    morit-pricetar-max30
-// @version      1.0.6
+// @version      1.0.7
 // @description  押した行のSKUだけ、Amazon日本の最大注文可能個数を30に設定・再確認します。
 // @match        https://jp3.pricetar.com/seller/product/*
 // @match        https://sellercentral.amazon.co.jp/interactive/listing/workflow/edit/offer*
@@ -17,7 +17,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const MAX_ID = 'max_order_quantity-0-value';
   const MAX_LABEL = '最大注文可能個数';
   const MARKET = 'A1VC38T7YXB528';
@@ -244,6 +244,29 @@
     assert(input.value === '30', '購入上限の入力に失敗しました。');
     return host;
   }
+  function focusedOn(input) {
+    // True only when the focus chain, through every shadow root, ends at input.
+    let node = input;
+    while (node.getRootNode() !== node.ownerDocument) {
+      const root = node.getRootNode();
+      if (root.activeElement !== node) return false;
+      node = root.host;
+    }
+    return node.ownerDocument.activeElement === node;
+  }
+  function typeMax(doc) {
+    // Types 30 the way a person would, for components that ignore events made
+    // by scripts. execCommand types into whatever has focus, so first make
+    // sure that is exactly the 購入上限 box and nothing else.
+    const { input } = maxField(doc);
+    input.focus();
+    assert(focusedOn(input), '購入上限の欄を選択できません。');
+    const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '');
+    const typed = doc.execCommand('insertText', false, '30');
+    input.blur();
+    assert(typed && input.value === '30', '購入上限の入力に失敗しました。');
+  }
   function clickKat(host) {
     assert(host && shown(host) && !host.hasAttribute('disabled'), '操作ボタンを確認できません。');
     const button = host.shadowRoot?.querySelector('button');
@@ -321,7 +344,8 @@
 
   // CommonJS export supports offline checks. In a normal userscript this branch is absent.
   const api = { VERSION, MAX_ID, clean, readRow, editUrl, checkPageIdentity, checkIdentity, editCounts,
-    onlyExpectedEdit, protectedSnapshot, sameProtected, snapshotDiff, maxField, setOnlyMax, deepAll, readySubmit,
+    onlyExpectedEdit, protectedSnapshot, sameProtected, snapshotDiff, maxField, setOnlyMax, typeMax, focusedOn,
+    deepAll, readySubmit,
     until, settled, sourceEditButton, offerPanel, panelAction, readyPanelAction, outsidePanelSnapshot, withinPanel,
     waitSubmitReady };
   if (typeof module === 'object' && module.exports) { module.exports = api; return; }
@@ -650,11 +674,9 @@
     onlyExpectedEdit(editCounts(document), 0);
     checkNoErrors();
     const oldMax = maxField(document).input.value;
-    writeJob(job, 'editing', '最大注文可能個数だけを30に入力しています。' + tries(job), { oldMax });
+    writeJob(job, 'editing', '最大注文可能個数だけを30に入力しています。' + tries(job), { oldMax, inputNote: '' });
     job.step = '購入上限の入力';
-    setOnlyMax(document);
-    await until(() => maxField(document).host.getAttribute('value') === '30'
-      && (layout.panel || editCounts(document).some(([id, n]) => id === 'hub-item-box-offer' && n === 1)), 12000, '購入上限30の入力反映');
+    await enterMax(job, layout);
     if (layout.panel) {
       job.step = 'パネルの保存と照合';
       panel('日本の編集パネルで購入上限だけを保存・照合しています。\nSKU：' + job.sku);
@@ -697,11 +719,26 @@
     panel(job.message + '\nSKU：' + job.sku);
     return reloadAfter(VERIFY_WAITS[0]);
   }
+  async function enterMax(job, layout) {
+    // Amazon has to take the edit, not just display it. Type like a person
+    // first, then fall back to setting the value with script events.
+    const taken = () => maxField(document).host.getAttribute('value') === '30'
+      && (layout.panel || editCounts(document).some(([id, n]) => id === 'hub-item-box-offer' && n === 1));
+    for (const write of [typeMax, setOnlyMax]) {
+      try { write(document); } catch { continue; }
+      if (await until(taken, 6000).then(() => true, () => false)) return;
+    }
+    const { host, input } = maxField(document);
+    job.inputNote = `購入上限の欄：表示=${input.value || '空欄'}、項目の値=${host.getAttribute('value') ?? 'なし'}、元の値=${job.oldMax || '空欄'}`;
+    // In the panel, Amazon's own edit count after 保存 proves whether it took
+    // the edit, and that is checked before anything is sent.
+    assert(layout.panel && input.value === '30', '購入上限30の入力が反映されませんでした。');
+  }
   async function recover(job, e) {
     // No rollback. Protected fields are never written, even on failure. Before
     // sending, a fresh page load discards everything; after sending, only the
     // value is read back (a new send happens only in work(), after read-backs).
-    const detail = (job.step ? `［${job.step}］` : '') + e.message;
+    const detail = (job.step ? `［${job.step}］` : '') + e.message + (job.inputNote ? '\n' + job.inputNote : '');
     const expired = Date.now() - job.createdAt >= TTL;
     if (['submitting', 'submitted'].includes(job.state)) {
       job.checks = (job.checks || 0) + 1;

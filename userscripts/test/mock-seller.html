@@ -54,7 +54,14 @@
       input.setAttribute('aria-label', this.getAttribute('kat-aria-label') || '');
       input.value = this.getAttribute('value') || '';
       input.disabled = this.hasAttribute('disabled');
-      input.addEventListener('input', () => { this.setAttribute('value', input.value); this.onKatChange?.(input.value); });
+      input.addEventListener('input', event => {
+        // trustedOnly: like a component that ignores script-made events.
+        // noReflect: the edit is taken but the host attribute never changes.
+        // rejectInput: the edit is shown in the box but never taken.
+        if ((cfg.trustedOnly && !event.isTrusted) || cfg.rejectInput) return;
+        if (!cfg.noReflect) this.setAttribute('value', input.value);
+        this.onKatChange?.(input.value);
+      });
       root.append(input);
     }
   }

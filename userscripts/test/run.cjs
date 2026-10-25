@@ -160,6 +160,9 @@ const sellerScenarios = [
   { name: 'late-cards', cfg: { lateCards: 3000 }, expect: { state: 'verified', submits: 1, clean: true } },
   { name: 'reloaded-while-editing', cfg: {}, state: 'editing', expect: { state: 'verified', submits: 1, clean: true } },
   { name: 'other-field-changes', cfg: { tamper: true }, expect: { state: 'failed', submits: 0, tamper: true } },
+  { name: 'script-input-ignored', cfg: { trustedOnly: true }, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'value-not-reflected', cfg: { noReflect: true }, expect: { state: 'verified', submits: 1, clean: true } },
+  { name: 'input-never-taken', cfg: { rejectInput: true }, expect: { state: 'failed', submits: 0 } },
 ];
 
 async function sellerScenario(browser, s) {

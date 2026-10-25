@@ -633,7 +633,7 @@
     }
     const sent = ['submitting', 'submitted'].includes(job.state);
     if (sent) writeJob(job, job.state, job.message);
-    else writeJob(job, 'opening', 'AmazonのSKUと入力欄を確認しています。' + tries(job));
+    else writeJob(job, 'opening', 'AmazonのSKUと入力欄を確認しています。' + tries(job), { inputNote: '' });
     panel((sent ? '送信した値を確認しています。' : '購入上限30個：確認中' + tries(job)) + '\nSKU：' + job.sku);
     job.step = 'Amazon画面の確認';
     const layout = await allFields(job);

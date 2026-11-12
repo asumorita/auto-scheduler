@@ -27,10 +27,16 @@ GitHub Actions（毎日 6:47〜22:31 の間に約1時間半おき・12回 ＋ 0�
 
 **A. Claude（Anthropic）の API キーを作って登録する**
 
-1. https://console.anthropic.com にログインし、支払い方法を登録してクレジットを購入します（使った分だけの課金です）。
-2. 「API Keys」でキーを作ってコピーします（一度しか表示されません）。
-3. GitHub のこのリポジトリで **Settings → Secrets and variables → Actions → New repository secret** を開き、
+Max プランに毎月付いてくる API クレジット（$100）を使います。クレジットの購入や支払い方法の登録は不要です。
+
+1. https://claude.ai の **設定 → 請求（Billing）** を開き、「API credits」で Console の組織を選んで紐づけます（組織がなければその場で作れます）。
+   紐づけた組織はあとから自分では変更できないので、このボット用に使う組織を選んでください。
+2. https://platform.claude.com の **Billing** ページの「Promotional credits」に $100 が入っていることを確認します。
+3. 同じ Console で **API Keys** を開き、キーを作ってコピーします（一度しか表示されません）。
+4. GitHub のこのリポジトリで **Settings → Secrets and variables → Actions → New repository secret** を開き、
    名前 `ANTHROPIC_API_KEY`、値にコピーしたキーを貼って保存します。
+
+支払い方法や自動チャージ（auto-reload）を設定しなければ、クレジットを使い切っても追加料金はかかりません。翌月のクレジットが届くまで投稿が止まるだけです。
 
 **B. Meta（Threads）のアプリを作る**
 
@@ -88,7 +94,8 @@ Threads のトークンは60日で切れるので、ボットが自動で延長�
 - **Threads API**：無料です。
 - **Claude API**：使った分だけかかります。モデル `claude-opus-5-5` の料金は100万トークンあたり入力 $4／出力 $20 です。
   1投稿あたり入力 約4,000トークン、出力（考える分を含む）数百〜2,000トークン程度と見込むと、**1投稿 $0.03〜0.06、1日12投稿で月 $11〜22 程度**です。
-  これは見積もりです。実際の金額は https://console.anthropic.com の使用状況で確認してください。
+  Max プランの毎月 $100 の API クレジットの範囲に収まる見込みです（見積もり）。
+  実際の使用額は https://platform.claude.com の Cost ページで確認できます。
   `config.toml` の `effort` を `low` にすると、考える量が減って安くなります（文章の質が下がる可能性があります）。
 
 ## 安全のための決まりごと

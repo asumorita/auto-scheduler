@@ -6,9 +6,9 @@
     python -m threads_bot.token_tool refresh     # 長期トークンの期限を延ばして保存
 
 環境変数:
-    THREADS_APP_ID         Meta のアプリの「Threads アプリID」
+    THREADS_APP_ID         Threads アプリID（省略時は config.toml の [threads] app_id）
     THREADS_APP_SECRET     Meta のアプリの「Threads app secret」
-    THREADS_REDIRECT_URI   Meta のアプリに登録したリダイレクトURL
+    THREADS_REDIRECT_URI   リダイレクトURL（省略時は config.toml の [threads] redirect_uri）
     THREADS_ACCESS_TOKEN   現在のトークン（refresh のとき）
     AUTH_CODE              認証後のURL、またはその中の code（from-code のとき）
     GH_TOKEN               Secrets を書き換えられる GitHub のトークン
@@ -23,6 +23,7 @@ import sys
 from urllib.parse import parse_qs, urlparse
 
 from . import threads_api
+from .config import ConfigError, load_config
 from .threads_api import ThreadsError
 
 SECRET_NAME = "THREADS_ACCESS_TOKEN"
@@ -43,8 +44,15 @@ def require_env(name: str) -> str:
     return value
 
 
+def app_id() -> str:
+    value = os.environ.get("THREADS_APP_ID", "").strip() or load_config().threads_app_id
+    if not value:
+        raise SetupError("Threads アプリID が config.toml の [threads] app_id に入っていません")
+    return value
+
+
 def redirect_uri() -> str:
-    uri = os.environ.get("THREADS_REDIRECT_URI", "").strip()
+    uri = os.environ.get("THREADS_REDIRECT_URI", "").strip() or load_config().threads_redirect_uri
     if uri:
         return uri
     repo = require_env("GITHUB_REPOSITORY")
@@ -92,7 +100,7 @@ def save_secret(token: str) -> None:
 
 
 def cmd_auth_url() -> None:
-    url = threads_api.build_authorize_url(require_env("THREADS_APP_ID"), redirect_uri())
+    url = threads_api.build_authorize_url(app_id(), redirect_uri())
     log("次のURLをブラウザで開いて、Threads アカウントでアクセスを許可してください:")
     log(url)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -110,7 +118,7 @@ def cmd_from_code() -> None:
     code = extract_code(require_env("AUTH_CODE"))
     mask(code)
     app_secret = require_env("THREADS_APP_SECRET")
-    short_token = threads_api.exchange_code(require_env("THREADS_APP_ID"), app_secret, redirect_uri(), code)
+    short_token = threads_api.exchange_code(app_id(), app_secret, redirect_uri(), code)
     mask(short_token)
     long_token = threads_api.exchange_for_long_lived(short_token, app_secret)
     mask(long_token)
@@ -120,7 +128,10 @@ def cmd_from_code() -> None:
 
 
 def cmd_refresh() -> None:
-    token = require_env("THREADS_ACCESS_TOKEN")
+    token = os.environ.get("THREADS_ACCESS_TOKEN", "").strip()
+    if not token:
+        log("THREADS_ACCESS_TOKEN がまだ登録されていないので、更新は行いません。")
+        return
     try:
         new_token = threads_api.refresh_long_lived(token)
     except ThreadsError as refresh_error:
@@ -155,7 +166,7 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         COMMANDS[argv[1]]()
-    except (SetupError, ThreadsError) as e:
+    except (SetupError, ThreadsError, ConfigError) as e:
         log(f"エラー: {e}")
         return 1
     return 0

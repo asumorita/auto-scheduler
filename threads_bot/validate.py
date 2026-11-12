@@ -16,19 +16,33 @@ def similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
+def count_lines(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
 def find_problems(
     text: str,
     *,
     max_chars: int,
     ng_words: Iterable[str],
     recent_posts: Iterable[str],
+    min_chars: int = 0,
+    min_lines: int = 1,
+    max_lines: int = 1000,
 ) -> list[str]:
     """問題点を日本語で返す。空リストなら合格。"""
-    problems: list[str] = []
     if not text.strip():
         return ["本文が空"]
+    problems: list[str] = []
     if len(text) > max_chars:
         problems.append(f"{len(text)}文字で長すぎる（{max_chars}文字以内にする）")
+    if len(text) < min_chars:
+        problems.append(f"{len(text)}文字で短すぎる（{min_chars}文字以上にする）")
+    lines = count_lines(text)
+    if lines < min_lines:
+        problems.append(f"{lines}行で少なすぎる（{min_lines}〜{max_lines}行にする）")
+    if lines > max_lines:
+        problems.append(f"{lines}行で多すぎる（{min_lines}〜{max_lines}行にする）")
     if URL_RE.search(text):
         problems.append("URL が入っている（URL は書かない）")
     if "#" in text or "＃" in text:

@@ -34,19 +34,15 @@ jobs:
       - name: 必要なライブラリを入れる
         run: pip install -r threads_bot/requirements.txt
 
+      # アプリID とリダイレクトURL は threads_bot/config.toml の [threads] から読みます
       - name: "手順1: 認証用URLを表示"
         if: startsWith(inputs.step, '1.')
-        env:
-          THREADS_APP_ID: ${{ vars.THREADS_APP_ID }}
-          THREADS_REDIRECT_URI: ${{ vars.THREADS_REDIRECT_URI }}
         run: python -m threads_bot.token_tool auth-url
 
       - name: "手順2: コードからトークンを保存"
         if: startsWith(inputs.step, '2.')
         env:
-          THREADS_APP_ID: ${{ vars.THREADS_APP_ID }}
           THREADS_APP_SECRET: ${{ secrets.THREADS_APP_SECRET }}
-          THREADS_REDIRECT_URI: ${{ vars.THREADS_REDIRECT_URI }}
           AUTH_CODE: ${{ inputs.auth_url }}
           GH_TOKEN: ${{ secrets.GH_PAT_FOR_SECRETS }}
         run: python -m threads_bot.token_tool from-code

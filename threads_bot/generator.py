@@ -20,34 +20,50 @@ class GenerationError(Exception):
 
 
 def build_system_prompt(cfg: Config) -> str:
-    return f"""あなたは Threads アカウントの投稿を書く担当者です。
+    examples = "\n\n".join(
+        f"<example>\n{example}\n</example>" for example in cfg.style_examples
+    ) or "（なし）"
+    return f"""あなたは Threads アカウントの投稿を、書き手本人になりかわって書く担当者です。
 
 # アカウント
 - テーマ: {cfg.theme}
+- 書き手: {cfg.persona}
 - 読者: {cfg.audience}
 - 文体: {cfg.tone}
 
-# 書き方のルール
+# 文体のお手本（このアカウントの過去の投稿）
+雰囲気・言葉づかい・改行の入れ方だけを参考にしてください。内容や言い回しをそのまま使ってはいけません。
+{examples}
+
+# 形式
 - 投稿の本文だけを出力してください。前置き・説明・タイトル・かぎかっこでのくくりは付けません。
-- {cfg.max_chars}文字以内。スマホで読みやすいよう、適度に改行してください。
-- ハッシュタグ（#）と URL は書きません。
-- 絵文字は使わないか、使っても1〜2個までにしてください。
-- 体験談・実績・数字・統計をでっちあげないでください。「私は〜で月◯万円」のような作り話は書きません。確かでないことは断定しません。
-- 「絶対」「必ず儲かる」のような誇大な表現や、投資・医療の具体的な助言はしません。
+- {cfg.min_lines}〜{min(cfg.max_lines, 6)}行、{cfg.min_chars}〜{cfg.max_chars}文字。短すぎると読まれないので、中身のある内容にしてください。
+- ハッシュタグ（#）・URL・商品名・ブランド名は書きません。
+
+# 内容のルール（健康の話なので、正確さと法律を守ります）
+- 病気が「治る」「予防できる」「改善する」と言い切らないでください。特定の食品・サプリ・商品の効き目もうたいません（薬機法・健康増進法に触れるおそれがあるため）。
+- 数字・統計・研究・専門家の発言は、広く知られていて確かなものだけにしてください。出典や数字を作ってはいけません。自信がなければ数字を使わずに書きます。
+- 「〜な人がいた」「ネットで見かけた」は、よく聞く一般的な話として書きます。実在しそうな特定の人物や、「〇kg痩せた」のような具体的な結果を作ってはいけません。
+- 書き手自身のことは「私も〜を意識しています」「試してみようと思います」程度にとどめ、具体的な成果や数値は書きません。
+- 家族の不幸・病気など、書き手の個人的な出来事は書きません。
+- 体の不調など医療の判断が必要な話題では、「気になる人はお医者さんに相談を」と添えてください。
+- 「絶対」「必ず」のような言い切りや、不安をあおる書き方はしません。
 - 最近の投稿と同じ話題・同じ書き出しを避け、毎回新しい切り口にしてください。"""
 
 
 def build_user_prompt(
     *,
     fmt: str,
+    topic: str,
     recent_posts: Sequence[str],
     now: datetime,
     feedback: Sequence[str] = (),
 ) -> str:
-    date = f"{now:%Y年%m月%d日}（{WEEKDAYS[now.weekday()]}）"
+    date = f"{now:%Y年%m月%d日}（{WEEKDAYS[now.weekday()]}）{now:%H時ごろ}"
     recent = "\n---\n".join(recent_posts) if recent_posts else "（まだありません）"
-    prompt = f"""今日は {date} です。
-今回の投稿パターン: {fmt}
+    prompt = f"""今は {date} です。
+今回の話題: {topic}
+今回の切り口: {fmt}
 
 最近の投稿（これらと被らないようにしてください）:
 <recent_posts>
@@ -66,6 +82,7 @@ def generate_post(
     cfg: Config,
     *,
     fmt: str,
+    topic: str,
     recent_posts: Sequence[str],
     now: datetime,
     feedback: Sequence[str] = (),
@@ -80,7 +97,9 @@ def generate_post(
         messages=[
             {
                 "role": "user",
-                "content": build_user_prompt(fmt=fmt, recent_posts=recent_posts, now=now, feedback=feedback),
+                "content": build_user_prompt(
+                    fmt=fmt, topic=topic, recent_posts=recent_posts, now=now, feedback=feedback
+                ),
             }
         ],
     )

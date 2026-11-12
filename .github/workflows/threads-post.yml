@@ -2,11 +2,20 @@ name: Threads 自動投稿
 
 on:
   schedule:
-    # 時刻は UTC で書きます（日本時間 = UTC + 9時間）。
+    # 1日12回。時刻は UTC で書きます（日本時間 = UTC + 9時間）。
     # GitHub の混み具合で数分〜数十分遅れることがあります。
-    - cron: "47 22 * * *" # 毎日 7:47 ごろ（日本時間）
-    - cron: "13 3 * * *" # 毎日 12:13 ごろ（日本時間）
-    - cron: "38 10 * * *" # 毎日 19:38 ごろ（日本時間）
+    - cron: "47 21 * * *" #  6:47 ごろ（日本時間）
+    - cron: "13 23 * * *" #  8:13 ごろ
+    - cron: "41 0 * * *" #  9:41 ごろ
+    - cron: "7 2 * * *" # 11:07 ごろ
+    - cron: "29 3 * * *" # 12:29 ごろ
+    - cron: "53 4 * * *" # 13:53 ごろ
+    - cron: "17 6 * * *" # 15:17 ごろ
+    - cron: "43 7 * * *" # 16:43 ごろ
+    - cron: "11 9 * * *" # 18:11 ごろ
+    - cron: "37 10 * * *" # 19:37 ごろ
+    - cron: "3 12 * * *" # 21:03 ごろ
+    - cron: "31 13 * * *" # 22:31 ごろ
   workflow_dispatch:
     inputs:
       dry_run:
@@ -22,9 +31,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 定期実行で実際に投稿するのは、threads_bot/config.toml の enabled が true のときだけです
   post:
-    # 定期実行は、リポジトリ変数 THREADS_BOT_ENABLED が true のときだけ動きます
-    if: github.event_name == 'workflow_dispatch' || vars.THREADS_BOT_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

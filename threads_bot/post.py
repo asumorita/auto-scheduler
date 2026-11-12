@@ -7,6 +7,8 @@
     ANTHROPIC_API_KEY     Claude API のキー
     THREADS_ACCESS_TOKEN  Threads の長期アクセストークン
     DRY_RUN               "true" なら投稿文を作るだけで投稿しない（テスト用）
+    GITHUB_EVENT_NAME     GitHub Actions が設定。"schedule"（定期実行）のときは
+                          config.toml の enabled が true の場合だけ投稿する
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ from .validate import find_problems
 
 JST = ZoneInfo("Asia/Tokyo")
 MAX_ATTEMPTS = 3
-RECENT_FOR_PROMPT = 10  # AI に見せる最近の投稿の数
-RECENT_FOR_CHECK = 50  # 似すぎチェックに使う最近の投稿の数
+RECENT_FOR_PROMPT = 12  # AI に見せる最近の投稿の数（約1日分）
+RECENT_FOR_CHECK = 60  # 似すぎチェックに使う最近の投稿の数（約5日分）
 
 
 def log(message: str) -> None:
@@ -67,28 +69,44 @@ def body_limit(cfg: Config, with_link: bool) -> int:
     return min(cfg.max_chars, THREADS_MAX_CHARS - extra)
 
 
-def create_body(cfg: Config, history: list[dict], with_link: bool, now: datetime) -> tuple[str, str]:
-    """投稿文を作ってチェックする。合格した本文と投稿パターンを返す。"""
-    fmt = cfg.formats[len(history) % len(cfg.formats)]
+def pick(items: tuple[str, ...], index: int) -> str:
+    return items[index % len(items)]
+
+
+def create_body(cfg: Config, history: list[dict], with_link: bool, now: datetime) -> tuple[str, str, str]:
+    """投稿文を作ってチェックする。合格した本文・切り口・話題を返す。"""
+    fmt = pick(cfg.formats, len(history))
+    topic = pick(cfg.topics, len(history))
     bodies = [h.get("body") or h.get("text", "") for h in history]
     recent_for_prompt = bodies[-RECENT_FOR_PROMPT:]
-    recent_for_check = bodies[-RECENT_FOR_CHECK:]
+    recent_for_check = list(cfg.style_examples) + bodies[-RECENT_FOR_CHECK:]
     limit = body_limit(cfg, with_link)
-    # 投稿文の文字数上限は本文に使える分に合わせる
     prompt_cfg = replace(cfg, max_chars=limit)
 
     client = anthropic.Anthropic()
     feedback: list[str] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        log(f"投稿文を作成中…（{attempt}回目、パターン: {fmt}）")
+        log(f"投稿文を作成中…（{attempt}回目、話題: {topic}、切り口: {fmt}）")
         body = generate_post(
-            client, prompt_cfg, fmt=fmt, recent_posts=recent_for_prompt, now=now, feedback=feedback
+            client,
+            prompt_cfg,
+            fmt=fmt,
+            topic=topic,
+            recent_posts=recent_for_prompt,
+            now=now,
+            feedback=feedback,
         )
         feedback = find_problems(
-            body, max_chars=limit, ng_words=cfg.ng_words, recent_posts=recent_for_check
+            body,
+            max_chars=limit,
+            min_chars=cfg.min_chars,
+            min_lines=cfg.min_lines,
+            max_lines=cfg.max_lines,
+            ng_words=cfg.ng_words,
+            recent_posts=recent_for_check,
         )
         if not feedback:
-            return body, fmt
+            return body, fmt, topic
         log("チェックで不合格: " + " / ".join(feedback))
     raise GenerationError(f"{MAX_ATTEMPTS}回作り直しても条件を満たす投稿ができませんでした")
 
@@ -99,6 +117,10 @@ def run() -> int:
     now = datetime.now(JST)
 
     cfg = load_config()
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and not cfg.enabled:
+        log("config.toml の enabled が false なので、今回は投稿しません。")
+        return 0
+
     history = load_history()
     with_link = should_add_link(cfg, history)
 
@@ -117,7 +139,7 @@ def run() -> int:
     else:
         log("注意: THREADS_ACCESS_TOKEN がないため、Threads アカウントの確認は省きました")
 
-    body, fmt = create_body(cfg, history, with_link, now)
+    body, fmt, topic = create_body(cfg, history, with_link, now)
     text = compose(body, cfg, with_link)
     log("----- 投稿文 -----\n" + text + "\n------------------")
 
@@ -125,7 +147,7 @@ def run() -> int:
         write_summary(
             "## テスト実行（投稿はしていません）\n\n"
             + (f"アカウント: @{me.get('username', '?')}\n\n" if me else "")
-            + f"パターン: {fmt}\n\n```\n{text}\n```"
+            + f"話題: {topic} ／ 切り口: {fmt}\n\n```\n{text}\n```"
         )
         log("テスト実行のため、投稿はしません。")
         return 0
@@ -139,6 +161,7 @@ def run() -> int:
     append_history(
         {
             "posted_at": now.isoformat(timespec="seconds"),
+            "topic": topic,
             "format": fmt,
             "body": body,
             "text": text,

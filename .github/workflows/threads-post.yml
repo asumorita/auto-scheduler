@@ -1,0 +1,64 @@
+name: Threads 自動投稿
+
+on:
+  schedule:
+    # 時刻は UTC で書きます（日本時間 = UTC + 9時間）。
+    # GitHub の混み具合で数分〜数十分遅れることがあります。
+    - cron: "47 22 * * *" # 毎日 7:47 ごろ（日本時間）
+    - cron: "13 3 * * *" # 毎日 12:13 ごろ（日本時間）
+    - cron: "38 10 * * *" # 毎日 19:38 ごろ（日本時間）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "テスト実行（チェックを入れると、投稿文を作るだけで投稿しません）"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: threads-bot
+  cancel-in-progress: false
+
+jobs:
+  post:
+    # 定期実行は、リポジトリ変数 THREADS_BOT_ENABLED が true のときだけ動きます
+    if: github.event_name == 'workflow_dispatch' || vars.THREADS_BOT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: threads_bot/requirements.txt
+
+      - name: 必要なライブラリを入れる
+        run: pip install -r threads_bot/requirements.txt
+
+      - name: 投稿時刻を少しずらす（0〜10分）
+        if: github.event_name == 'schedule'
+        run: sleep $(( RANDOM % 600 ))
+
+      - name: 投稿文を作って Threads に投稿する
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: python -m threads_bot.post
+
+      - name: 投稿履歴をリポジトリに保存する
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add threads_bot/data/history.jsonl
+          if git diff --cached --quiet; then
+            echo "保存する履歴はありません"
+            exit 0
+          fi
+          git commit -m "Threads の投稿履歴を更新"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"

@@ -1,0 +1,52 @@
+name: Threads 初期設定
+
+# 最初に1回だけ使います。手順は threads_bot/README.md を見てください。
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "どの手順を実行しますか"
+        type: choice
+        options:
+          - "1. 認証用URLを表示"
+          - "2. コードからトークンを保存"
+      auth_url:
+        description: "手順2のときだけ：許可したあとに表示されたページのURLを丸ごと貼り付け"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: threads_bot/requirements.txt
+
+      - name: 必要なライブラリを入れる
+        run: pip install -r threads_bot/requirements.txt
+
+      - name: "手順1: 認証用URLを表示"
+        if: startsWith(inputs.step, '1.')
+        env:
+          THREADS_APP_ID: ${{ vars.THREADS_APP_ID }}
+          THREADS_REDIRECT_URI: ${{ vars.THREADS_REDIRECT_URI }}
+        run: python -m threads_bot.token_tool auth-url
+
+      - name: "手順2: コードからトークンを保存"
+        if: startsWith(inputs.step, '2.')
+        env:
+          THREADS_APP_ID: ${{ vars.THREADS_APP_ID }}
+          THREADS_APP_SECRET: ${{ secrets.THREADS_APP_SECRET }}
+          THREADS_REDIRECT_URI: ${{ vars.THREADS_REDIRECT_URI }}
+          AUTH_CODE: ${{ inputs.auth_url }}
+          GH_TOKEN: ${{ secrets.GH_PAT_FOR_SECRETS }}
+        run: python -m threads_bot.token_tool from-code
